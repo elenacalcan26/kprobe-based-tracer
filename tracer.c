@@ -20,7 +20,7 @@
 
 #include "tracer.h"
 
-#define MAXACTIVE 32
+#define MAXACTIVE 64
 
 DEFINE_SPINLOCK(lock);
 
@@ -186,8 +186,6 @@ static int kmalloc_probe_handler(struct kretprobe_instance *ri, struct pt_regs *
     mem_info->addr = address;
     mem_info->size = *size;
 
-    spin_lock(&lock);
-
     list_for_each_safe(p, q, &head) {
         tr_record = list_entry(p, struct tracer_record, next);
         if (tr_record->pid == current->pid) {
@@ -196,7 +194,6 @@ static int kmalloc_probe_handler(struct kretprobe_instance *ri, struct pt_regs *
             list_add(&mem_info->next, &tr_record->mem_infos);
         }
     };
-    spin_unlock(&lock);
 
     return 0;
 }
@@ -207,28 +204,23 @@ static int kfree_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
     struct mem_info *mi;
     struct list_head *p, *q, *t;
 
-    spin_lock(&lock);
     list_for_each_safe(p, q, &head) {
         tr_record = list_entry(p, struct tracer_record, next);
         if (tr_record->pid == current->pid) {
             tr_record->kfree_calls++;
             list_for_each(t, &tr_record->mem_infos) {
                 mi = list_entry(t, struct mem_info, next);
-
                 if (mi->addr == regs->ax) {
                     tr_record->kfree_mem += mi->size;
-                    // break;
                 }
             }
-
         }
     }
 
-    spin_unlock(&lock);
     return 0;
 }
 
-static int sched_handler(struct kprobe *ri, struct pt_regs *regs)
+static int sched_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
     struct tracer_record *tr_record;
     struct list_head *p, *q;
@@ -238,14 +230,13 @@ static int sched_handler(struct kprobe *ri, struct pt_regs *regs)
 
         if (tr_record->pid == current->pid) {
             tr_record->sched_calls++;
-            // break;
         }
     }
 
     return 0;
 }
 
-static int up_handler(struct kprobe *ri, struct pt_regs *regs)
+static int up_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
     struct tracer_record *tr_record;
     struct list_head *p, *q;
@@ -255,14 +246,13 @@ static int up_handler(struct kprobe *ri, struct pt_regs *regs)
 
         if (tr_record->pid == current->pid) {
             tr_record->up_calls++;
-            // break;
         }
     }
 
     return 0;
 }
 
-static int down_handler(struct kprobe *ri, struct pt_regs *regs)
+static int down_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
     struct tracer_record *tr_record;
     struct list_head *p, *q;
@@ -272,7 +262,39 @@ static int down_handler(struct kprobe *ri, struct pt_regs *regs)
 
         if (tr_record->pid == current->pid) {
             tr_record->down_calls++;
-            // break;
+        }
+    }
+
+    return 0;
+}
+
+static int mutex_lock_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
+{
+    struct tracer_record *tr_record;
+    struct list_head *p, *q;
+
+    list_for_each_safe(p, q, &head) {
+        tr_record = list_entry(p, struct tracer_record, next);
+
+        if (tr_record->pid == current->pid) {
+            tr_record->lock_calls++;
+
+        }
+    }
+
+    return 0;
+}
+
+static int mutex_unlock_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
+{
+    struct tracer_record *tr_record;
+    struct list_head *p, *q;
+
+    list_for_each_safe(p, q, &head) {
+        tr_record = list_entry(p, struct tracer_record, next);
+
+        if (tr_record->pid == current->pid) {
+            tr_record->unlock_call++;
         }
     }
 
@@ -293,19 +315,34 @@ static struct kretprobe kfree_probe = {
     .maxactive = MAXACTIVE,
 };
 
-static struct kprobe sched_probe = {
-    .pre_handler = sched_handler,
-    .symbol_name = "schedule",
+static struct kretprobe sched_probe = {
+    .handler = sched_handler,
+    .kp.symbol_name = "schedule",
+    .maxactive = MAXACTIVE,
 };
 
-static struct kprobe up_probe = {
-    .pre_handler = up_handler,
-    .symbol_name = "up",
+static struct kretprobe up_probe = {
+    .handler = up_handler,
+    .kp.symbol_name = "up",
+    .maxactive = MAXACTIVE,
 };
 
-static struct kprobe down_probe = {
-    .pre_handler = down_handler,
-    .symbol_name = "down_interruptible",
+static struct kretprobe down_probe = {
+    .handler = down_handler,
+    .kp.symbol_name = "down_interruptible",
+    .maxactive = MAXACTIVE,
+};
+
+static struct kretprobe mutex_lock_probe = {
+    .handler = mutex_lock_handler,
+    .kp.symbol_name = "mutex_lock_nested",
+    .maxactive = MAXACTIVE,
+};
+
+static struct kretprobe mutex_unlock_probe = {
+    .handler = mutex_unlock_handler,
+    .kp.symbol_name = "mutex_unlock",
+    .maxactive = MAXACTIVE,
 };
 
 static const struct file_operations tracer_fops = {
@@ -353,11 +390,15 @@ static int kretprobe_init(void)
 
     ret = register_kretprobe(&kfree_probe);
 
-    ret = register_kprobe(&sched_probe);
+    ret = register_kretprobe(&sched_probe);
 
-    ret = register_kprobe(&up_probe);
+    ret = register_kretprobe(&up_probe);
 
-    ret = register_kprobe(&down_probe);
+    ret = register_kretprobe(&down_probe);
+
+    ret = register_kretprobe(&mutex_lock_probe);
+
+    ret = register_kretprobe(&mutex_unlock_probe);
 
     return 0;
 }
@@ -366,9 +407,11 @@ static void kretprobe_exit(void)
 {
     unregister_kretprobe(&kmalloc_probe);
     unregister_kretprobe(&kfree_probe);
-    unregister_kprobe(&sched_probe);
-    unregister_kprobe(&up_probe);
-    unregister_kprobe(&down_probe);
+    unregister_kretprobe(&sched_probe);
+    unregister_kretprobe(&up_probe);
+    unregister_kretprobe(&down_probe);
+    unregister_kretprobe(&mutex_lock_probe);
+    unregister_kretprobe(&mutex_unlock_probe);
 
     proc_remove(proc_tracer);
     misc_deregister(&tracer_dev);
