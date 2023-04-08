@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0+
 
 /*
- * tracer.c - Linux kernel kprobe
+ * tracer.c - Kprobe based tracer
  *
  * Author: Elena-Claudia Calcan <elena.calcan26@gmail.com>
  */
@@ -27,6 +27,9 @@ DEFINE_SPINLOCK(lock);
 static struct proc_dir_entry *proc_tracer;
 static struct list_head head;
 
+/*
+ * Holds information about memory allocation, such as the size and address of the memory allocated.
+ */
 struct mem_info {
 	unsigned long size;
 	unsigned long addr;
@@ -34,6 +37,9 @@ struct mem_info {
 	struct list_head next;
 };
 
+/*
+ * Holds information about a traced process.
+ */
 struct tracer_record {
 	pid_t pid;
 	int kmalloc_calls;
@@ -70,6 +76,7 @@ static long tracer_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 
 	case TRACER_ADD_PROCESS:
 
+		/* initialize the structure for a new traced process */
 		tr_record = kmalloc(sizeof(*tr_record), GFP_ATOMIC);
 		if (!tr_record)
 			return -ENOMEM;
@@ -88,6 +95,7 @@ static long tracer_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 
 		INIT_LIST_HEAD(&tr_record->mem_infos);
 
+		/* add new traced process in list */
 		list_add(&tr_record->next, &head);
 
 		spin_unlock(&lock);
@@ -99,13 +107,14 @@ static long tracer_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 
 			if (tr_record->pid == arg) {
 				spin_lock(&lock);
+				/* frees memory allocate by the memory info structure*/
 				list_for_each_safe(m, n, &tr_record->mem_infos) {
 					mem_info = list_entry(m, struct mem_info, next);
 
 					list_del(m);
 					kfree(mem_info);
 				}
-
+				/* remove element from the list and frees the memory */
 				list_del(p);
 				kfree(tr_record);
 				spin_unlock(&lock);
@@ -124,6 +133,8 @@ static int proc_tracer_show(struct seq_file *m, void *v)
 {
 	struct list_head *p, *q;
 	struct tracer_record *tr_record;
+
+	/* display the retained information via procfs file system, in the /proc/tracer file */
 
 	seq_puts(
 		m,
@@ -161,6 +172,7 @@ static int kmalloc_probe_entry_handler(struct kretprobe_instance *ri, struct pt_
 {
 	unsigned long *size;
 
+	/* store the size of the allocated memory */
 	size = (unsigned long *)ri->data;
 	*size = regs->ax;
 
@@ -175,9 +187,13 @@ static int kmalloc_probe_handler(struct kretprobe_instance *ri, struct pt_regs *
 	unsigned long *size;
 	unsigned long address;
 
+	/* get the size of the allocated data */
 	size = (unsigned long *)ri->data;
+
+	/* get the address of the allocated memory */
 	address = regs_return_value(regs);
 
+	/* store the retrieved information in the mem_info structure variable  */
 	mem_info = kmalloc(sizeof(*mem_info), GFP_ATOMIC);
 	if (!mem_info)
 		return -ENOMEM;
@@ -189,8 +205,10 @@ static int kmalloc_probe_handler(struct kretprobe_instance *ri, struct pt_regs *
 		tr_record = list_entry(p, struct tracer_record, next);
 		if (tr_record->pid == current->pid) {
 			spin_lock(&lock);
+			/* update traced process data on __kmalloc calls & allocated memory */
 			tr_record->kmalloc_calls++;
 			tr_record->kmalloc_mem += *size;
+			/* store information about the new amount of memory allocated and its address */
 			list_add(&mem_info->next, &tr_record->mem_infos);
 			spin_unlock(&lock);
 		}
@@ -212,6 +230,7 @@ static int kfree_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
 			list_for_each(t, &tr_record->mem_infos) {
 				mem_info = list_entry(t, struct mem_info, next);
 				spin_lock(&lock);
+				/* get the size of the freed memory from address */
 				if (mem_info->addr == regs->ax)
 					tr_record->kfree_mem += mem_info->size;
 				spin_unlock(&lock);
@@ -297,6 +316,8 @@ static int mutex_unlock_handler(struct kretprobe_instance *ri, struct pt_regs *r
 	return 0;
 }
 
+
+/* Declare required kretprobe structures */
 static struct kretprobe kmalloc_probe = {
 	.entry_handler = kmalloc_probe_entry_handler,
 	.handler = kmalloc_probe_handler,
@@ -341,6 +362,7 @@ static struct kretprobe mutex_unlock_probe = {
 	.maxactive = MAXACTIVE,
 };
 
+/* file operation and process property*/
 static const struct file_operations tracer_fops = {
 	.owner = THIS_MODULE,
 	.open = tracer_open,
@@ -348,16 +370,17 @@ static const struct file_operations tracer_fops = {
 	.unlocked_ioctl = tracer_ioctl
 };
 
-static struct miscdevice tracer_dev = {
-	.minor = TRACER_DEV_MINOR,
-	.name = TRACER_DEV_NAME,
-	.fops = &tracer_fops
-};
-
 static const struct proc_ops r_pops = {
 	.proc_open		= proc_tracer_open,
 	.proc_read		= seq_read,
 	.proc_release	= single_release
+};
+
+/* declare miscdivice structure */
+static struct miscdevice tracer_dev = {
+	.minor = TRACER_DEV_MINOR,
+	.name = TRACER_DEV_NAME,
+	.fops = &tracer_fops
 };
 
 static int kretprobe_init(void)
